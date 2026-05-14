@@ -4,11 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       app_input:
-        description: 'App name, URL, or package ID'
+        description: 'App name, URL, or package ID (e.g., "ShadowShare", "com.v2cross.shadowshare", or "https://play.google.com/store/apps/details?id=com.v2cross.shadowshare")'
         required: true
         type: string
+        default: ''
       download_folder:
-        description: 'Folder to save the APK'
+        description: 'Folder to save the APK (default: apks/)'
         required: false
         type: string
         default: 'apks'
@@ -33,58 +34,69 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install gplaycli google-play-scraper
-        # Downgrade protobuf to a compatible version
-        pip install 'protobuf<3.21'
+        pip install gplaycli
+        # Install Google Play API for package extraction
+        pip install google-play-scraper
 
     - name: Extract Package ID and Download APK
       env:
         APP_INPUT: ${{ github.event.inputs.app_input }}
         DOWNLOAD_FOLDER: ${{ github.event.inputs.download_folder }}
-        # Optional: Use the environment variable workaround as a fallback
-        # PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
       run: |
         python - <<EOF
-        import re, subprocess, sys, os
-        from google_play_scraper import app, search
+        import re
+        import subprocess
+        import sys
+        import os
+        from google_play_scraper import app
 
         def extract_package_id(input_str):
-            # URL
+            # If it's a URL, extract the id parameter
             url_match = re.search(r'[?&]id=([^&]+)', input_str)
             if url_match:
                 return url_match.group(1)
-            # Package ID
+            
+            # If it's a simple package ID format (com.example.app)
             if re.match(r'^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$', input_str, re.IGNORECASE):
                 return input_str
-            # App name: search
+            
+            # Otherwise, treat as app name and search for it
             try:
-                return app(input_str)['appId']
+                # Search for app by name
+                result = app(input_str)
+                return result['appId']
             except:
-                results = search(input_str, n_hits=1)
-                if results:
-                    return results[0]['appId']
+                # If all else fails, try searching with the input as search term
+                from google_play_scraper import search
+                search_results = search(input_str, n_hits=1)
+                if search_results:
+                    return search_results[0]['appId']
+            
             return None
 
         package_id = extract_package_id(os.environ['APP_INPUT'])
+        
         if not package_id:
             print(f"Could not extract package ID from: {os.environ['APP_INPUT']}")
             sys.exit(1)
-
+        
         print(f"Package ID: {package_id}")
+        
+        # Create download directory
         download_folder = os.environ['DOWNLOAD_FOLDER']
         os.makedirs(download_folder, exist_ok=True)
-
-        # Download APK
+        
+        # Download APK using gplaycli
         result = subprocess.run([
             'gplaycli', '-d', package_id,
             '-f', download_folder,
             '-p'
         ], capture_output=True, text=True)
-
+        
         if result.returncode != 0:
             print(f"Download failed: {result.stderr}")
             sys.exit(1)
-
+        
         print(f"Successfully downloaded APK for {package_id}")
         EOF
 
@@ -94,14 +106,19 @@ jobs:
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
+        
+        # Get app name for commit message
         APP_NAME="${{ github.event.inputs.app_input }}"
         TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-
-        git add "${{ env.DOWNLOAD_FOLDER }}"/*.apk 2>/dev/null || true
-        if ! git diff --staged --quiet; then
-          git commit -m "Add APK for $APP_NAME (downloaded $TIMESTAMP)"
-          git push origin HEAD:"${{ github.ref_name }}"
-          echo "Successfully committed APK files to repository"
-        else
+        
+        # Add downloaded APK files
+        git add ${{ env.DOWNLOAD_FOLDER }}/*.apk 2>/dev/null || true
+        
+        # Check if there are changes
+        if git diff --staged --quiet; then
           echo "No changes to commit"
+        else
+          git commit -m "Add APK for $APP_NAME (downloaded $TIMESTAMP)"
+          git push origin HEAD:${{ github.ref_name }}
+          echo "Successfully committed APK files to repository"
         fi
