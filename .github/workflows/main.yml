@@ -1,0 +1,47 @@
+name: Download APK from Google Play (Simple)
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_id:
+        description: 'Package ID (e.g., com.v2cross.shadowshare)'
+        required: true
+        type: string
+      download_folder:
+        description: 'Folder to save the APK'
+        required: false
+        type: string
+        default: 'apks'
+
+jobs:
+  download-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install gplaycli
+      run: pip install gplaycli
+
+    - name: Download APK
+      run: |
+        mkdir -p ${{ github.event.inputs.download_folder }}
+        gplaycli -d ${{ github.event.inputs.package_id }} \
+                 -f ${{ github.event.inputs.download_folder }} \
+                 -p
+
+    - name: Commit and Push APK
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add ${{ github.event.inputs.download_folder }}/*.apk
+        git diff --staged --quiet || git commit -m "Add APK for ${{ github.event.inputs.package_id }}"
+        git push
