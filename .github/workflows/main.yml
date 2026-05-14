@@ -1,15 +1,14 @@
-name: Download APK from Google Play Store
+name: Download APK from APKMirror
 
 on:
   workflow_dispatch:
     inputs:
-      app_input:
-        description: 'App name, URL, or package ID (e.g., "ShadowShare", "com.v2cross.shadowshare", or "https://play.google.com/store/apps/details?id=com.v2cross.shadowshare")'
+      package_id:
+        description: 'Package ID (e.g., com.v2cross.shadowshare)'
         required: true
         type: string
-        default: ''
       download_folder:
-        description: 'Folder to save the APK (default: apks/)'
+        description: 'Folder to save the APK'
         required: false
         type: string
         default: 'apks'
@@ -23,8 +22,6 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
 
     - name: Setup Python
       uses: actions/setup-python@v5
@@ -32,72 +29,114 @@ jobs:
         python-version: '3.10'
 
     - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install gplaycli
-        # Install Google Play API for package extraction
-        pip install google-play-scraper
+      run: pip install requests beautifulsoup4 lxml
 
-    - name: Extract Package ID and Download APK
+    - name: Download APK from APKMirror
       env:
-        APP_INPUT: ${{ github.event.inputs.app_input }}
+        PACKAGE_ID: ${{ github.event.inputs.package_id }}
         DOWNLOAD_FOLDER: ${{ github.event.inputs.download_folder }}
       run: |
         python - <<EOF
+        import requests
+        from bs4 import BeautifulSoup
         import re
-        import subprocess
-        import sys
         import os
-        from google_play_scraper import app
+        import sys
+        import time
 
-        def extract_package_id(input_str):
-            # If it's a URL, extract the id parameter
-            url_match = re.search(r'[?&]id=([^&]+)', input_str)
-            if url_match:
-                return url_match.group(1)
-            
-            # If it's a simple package ID format (com.example.app)
-            if re.match(r'^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$', input_str, re.IGNORECASE):
-                return input_str
-            
-            # Otherwise, treat as app name and search for it
-            try:
-                # Search for app by name
-                result = app(input_str)
-                return result['appId']
-            except:
-                # If all else fails, try searching with the input as search term
-                from google_play_scraper import search
-                search_results = search(input_str, n_hits=1)
-                if search_results:
-                    return search_results[0]['appId']
-            
-            return None
-
-        package_id = extract_package_id(os.environ['APP_INPUT'])
-        
-        if not package_id:
-            print(f"Could not extract package ID from: {os.environ['APP_INPUT']}")
-            sys.exit(1)
-        
-        print(f"Package ID: {package_id}")
-        
-        # Create download directory
+        package = os.environ['PACKAGE_ID']
         download_folder = os.environ['DOWNLOAD_FOLDER']
         os.makedirs(download_folder, exist_ok=True)
+
+        # Step 1: Get the app page on APKMirror
+        search_url = f"https://www.apkmirror.com/?post_type=app_release&searchtype=apk&s={package}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         
-        # Download APK using gplaycli
-        result = subprocess.run([
-            'gplaycli', '-d', package_id,
-            '-f', download_folder,
-            '-p'
-        ], capture_output=True, text=True)
-        
-        if result.returncode != 0:
-            print(f"Download failed: {result.stderr}")
+        resp = requests.get(search_url, headers=headers)
+        if resp.status_code != 200:
+            print(f"Failed to reach APKMirror: {resp.status_code}")
             sys.exit(1)
         
-        print(f"Successfully downloaded APK for {package_id}")
+        soup = BeautifulSoup(resp.text, 'lxml')
+        # Find the first result link that contains the package name in the URL
+        app_link = None
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if f'/{package}/' in href and 'apkmirror.com/apk/' in href:
+                app_link = href
+                break
+        
+        if not app_link:
+            print(f"Could not find app with package '{package}' on APKMirror")
+            sys.exit(1)
+        
+        # Ensure full URL
+        if not app_link.startswith('http'):
+            app_link = 'https://www.apkmirror.com' + app_link
+        
+        print(f"Found app page: {app_link}")
+        
+        # Step 2: Get the download page for the latest version
+        app_resp = requests.get(app_link, headers=headers)
+        app_soup = BeautifulSoup(app_resp.text, 'lxml')
+        
+        # Find the "Download APK" button's link (usually a 'a' with 'downloadButton' class or similar)
+        download_button = app_soup.find('a', {'class': 'downloadButton'})
+        if not download_button:
+            # Alternative: look for any link containing 'download' after the version list
+            download_section = app_soup.find('div', {'class': 'download'})
+            if download_section:
+                download_button = download_section.find('a')
+        
+        if not download_button or not download_button.get('href'):
+            print("Could not locate download button on the page")
+            sys.exit(1)
+        
+        download_page_url = download_button['href']
+        if not download_page_url.startswith('http'):
+            download_page_url = 'https://www.apkmirror.com' + download_page_url
+        
+        print(f"Download page: {download_page_url}")
+        
+        # Step 3: Get the actual download link (usually a page that redirects)
+        download_page_resp = requests.get(download_page_url, headers=headers)
+        download_soup = BeautifulSoup(download_page_resp.text, 'lxml')
+        
+        # Find the real download link (often inside a 'a' with 'downloadButton' again)
+        real_download = download_soup.find('a', {'class': 'downloadButton'})
+        if not real_download:
+            # Sometimes it's a 'a' with 'btn' class and 'download' in text
+            real_download = download_soup.find('a', string=re.compile(r'download', re.I))
+        
+        if not real_download or not real_download.get('href'):
+            print("Could not extract final download URL")
+            sys.exit(1)
+        
+        apk_url = real_download['href']
+        if not apk_url.startswith('http'):
+            apk_url = 'https://www.apkmirror.com' + apk_url
+        
+        print(f"Downloading from: {apk_url}")
+        
+        # Step 4: Download the APK
+        apk_resp = requests.get(apk_url, headers=headers, stream=True)
+        if apk_resp.status_code != 200:
+            print(f"Download failed with status {apk_resp.status_code}")
+            sys.exit(1)
+        
+        # Determine filename from Content-Disposition or from URL
+        filename = f"{package}.apk"
+        if 'Content-Disposition' in apk_resp.headers:
+            cd = apk_resp.headers['Content-Disposition']
+            if 'filename=' in cd:
+                filename = cd.split('filename=')[1].strip('"')
+        
+        filepath = os.path.join(download_folder, filename)
+        with open(filepath, 'wb') as f:
+            for chunk in apk_resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+        
+        print(f"APK saved to {filepath}")
         EOF
 
     - name: Commit and Push APK
@@ -106,19 +145,12 @@ jobs:
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        
-        # Get app name for commit message
-        APP_NAME="${{ github.event.inputs.app_input }}"
         TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-        
-        # Add downloaded APK files
-        git add ${{ env.DOWNLOAD_FOLDER }}/*.apk 2>/dev/null || true
-        
-        # Check if there are changes
-        if git diff --staged --quiet; then
-          echo "No changes to commit"
+        git add "${{ env.DOWNLOAD_FOLDER }}"/*.apk
+        if ! git diff --staged --quiet; then
+          git commit -m "Add APK for ${{ github.event.inputs.package_id }} (APKMirror $TIMESTAMP)"
+          git push
+          echo "APK committed successfully"
         else
-          git commit -m "Add APK for $APP_NAME (downloaded $TIMESTAMP)"
-          git push origin HEAD:${{ github.ref_name }}
-          echo "Successfully committed APK files to repository"
+          echo "No new APK to commit"
         fi
